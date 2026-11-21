@@ -1,0 +1,46 @@
+# Fork-only (oliviacpu/mini-media-player): tag main oliviacpu-YYYY.MM.DD[.N] and create the GitHub Release the
+# Marketplace installs from, with upstream's own mini-media-player-bundle.js for the release tag main is on.
+# Run by fork-sync.yml, or by hand. See FORK.md.
+name: Fork release
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository != 'kalkih/mini-media-player'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Release
+        run: |
+          set -euo pipefail
+          test -s hacs.json
+          git fetch --quiet --tags https://github.com/kalkih/mini-media-player.git
+          git fetch --quiet --force --tags origin
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD)
+          gh release download "$base" --repo kalkih/mini-media-player --pattern mini-media-player-bundle.js --dir out
+          day=$(date -u +%Y.%m.%d)
+          count=$(git tag -l "oliviacpu-$day" "oliviacpu-$day.*" | wc -l | tr -d ' ')
+          suffix=""
+          [ "$count" -gt 0 ] && suffix=".$((count + 1))"
+          tag="oliviacpu-$day$suffix"
+          git tag "$tag" HEAD
+          git push origin "$tag"
+          gh release create "$tag" out/mini-media-player-bundle.js --verify-tag \
+            --title "$base-oliviacpu.$(date -u +%Y%m%d)$suffix" \
+            --notes "Upstream [$base](https://github.com/kalkih/mini-media-player/releases/tag/$base) with its own \`mini-media-player-bundle.js\`, plus this fork's \`hacs.json\` (see FORK.md)."

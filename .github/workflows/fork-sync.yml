@@ -1,0 +1,64 @@
+# Fork-only: daily, when upstream publishes a release main doesn't have, merge its tag into main, push and release.
+# Anything that needs a person opens the upstream-sync issue instead. See FORK.md.
+name: Fork sync
+
+on:
+  schedule:
+    - cron: "17 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: github.repository != 'kalkih/mini-media-player'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          tag=$(gh release view --repo kalkih/mini-media-player --json tagName --jq .tagName)
+          git fetch --quiet https://github.com/kalkih/mini-media-player.git "refs/tags/$tag:refs/tags/$tag"
+          if git merge-base --is-ancestor "$tag" HEAD; then
+            echo "main already has upstream $tag"
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          log=$(mktemp)
+          needs_hand() {
+            gh label create upstream-sync --color d93f0b --description "Upstream merge needs a hand" --force >/dev/null
+            body=$(printf 'Upstream release `%s` was not merged: %s.\n\nRun: %s\n\n```\n%s\n```\n' \
+              "$tag" "$1" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" "$(tail -n 40 "$log")")
+            open=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number // empty')
+            if [ -n "$open" ]; then gh issue comment "$open" --body "$body"; else gh issue create --title "Upstream merge needs a hand" --label upstream-sync --body "$body"; fi
+            exit 1
+          }
+          git merge --no-ff --no-edit -m "Merge upstream $tag" "$tag" >"$log" 2>&1 || { git merge --abort || true; needs_hand "the merge conflicts"; }
+          if git diff --name-only HEAD^1 HEAD | grep -q '^\.github/workflows/'; then
+            needs_hand "it changes workflow files, which this workflow's token may not push"
+          fi
+          git push origin HEAD:main >"$log" 2>&1 || needs_hand "the push was refused"
+          echo "merged upstream $tag"
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: merge
+    if: needs.merge.outputs.merged == 'true'
+    uses: ./.github/workflows/fork-release.yml
